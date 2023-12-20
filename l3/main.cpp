@@ -23,10 +23,21 @@ struct Matrix {
 
   int h() { return h_; }
   int w() { return w_; }
-  int& operator[](std::pair<size_t, size_t> ij) { return ptr_[ij.first * w_ + ij.second]; }
+  int& operator[](std::pair<size_t, size_t> ij) { 
+    return ptr_[ij.first * w_ + ij.second]; 
+  }
 
-  void operator+=(const Matrix& o) { for (int i = 0; i < h_ * w_; i++) ptr_[i] += o.ptr_[i]; }
-  void fill() { for (int i = 0; i < h_ * w_; i++) ptr_[i] = rand() % 100; }
+  void operator+=(const Matrix& o) { 
+    for (int i = 0; i < h_ * w_; i++) ptr_[i] += o.ptr_[i]; 
+  }
+
+  void fill() { 
+    for (int i = 0; i < h_ * w_; i++) ptr_[i] = rand() % 100; 
+  }
+
+  void clear() {
+    for (int i = 0; i < h_ * w_; i++) ptr_[i] = 0; 
+  }
 
   void fence() { MPI_Win_fence(0, win_); }
   void send(int dest) const { MPI_Send(ptr_, w_ * h_, MPI_INT, dest, 0, MPI_COMM_WORLD); }
@@ -49,57 +60,58 @@ private:
   MPI_Win win_;
 };
 
-void CalculateStrip(Matrix& a, Matrix& b) {
-  int kb = a.w() / GLOB_size;
-  int ks = GLOB_rank * kb;
-  int ke = (GLOB_rank + 1) * kb;
-
-  //std::cout << GLOB_rank << " takes " << ks << " to " << ke << std::endl;
-  assert(ks != ke);
-  assert(a.w() % GLOB_size == 0);
-
-  Matrix local(Matrix::Local{}, a.h(), a.w());
-  for (int i = 0; i < a.h(); i++) {
-    for (int j = 0; j < a.w(); j++) {
-      for (int k = ks; k < ke; k++) {
-        local[{i, j}] = a[{i, k}] * b[{k, j}];
-      }
-    }
-  }
-
-  if (GLOB_rank > 0) {
-    local.send(0);
-  } else {
-    Matrix recv{Matrix::Local{}, local.h(), local.w()};
-    for (int t = 1; t < GLOB_size; t++) {
-      recv.recv(t);
-      local += recv;
-    }
-    std::cout << "done" << std::endl;
-  }
-}
-
 int main(int argc, char** argv) {
   MPI_Init(&argc, &argv);
   MPI_Comm_rank(MPI_COMM_WORLD, &GLOB_rank);
   MPI_Comm_size(MPI_COMM_WORLD, &GLOB_size);
 
-  int n = 800;
-  int r = 800;
+  int n = 2000;
+  int r = std::atoi(argv[1]);
 
-  Matrix a{Matrix::Shared{}, r, n}, b{Matrix::Shared{}, n, n};
+  Matrix a{Matrix::Shared{}, n, n}, b{Matrix::Shared{}, n, n};
 
   b.fence();
-  b.fill();
-  b.fence();
-
-  for (int part = 0; part < n / r; part++) {
-    a.fence(); 
+  if (GLOB_rank == 0) {
+    b.fill();
     a.fill();
-    a.fence();
-
-    CalculateStrip(a, b);
   }
+  b.fence();
+
+  //std::cout << GLOB_rank << " over fence " << std::endl;
+
+  int kb = a.w() / GLOB_size;
+  int ks = GLOB_rank * kb;
+  int ke = (GLOB_rank + 1) * kb;
+
+  assert(ks != ke);
+  assert(a.w() % GLOB_size == 0);
+
+  Matrix local{Matrix::Local{}, r, n};
+
+  for (int s = 0; s < n; s += r) {
+    if (GLOB_rank > 0) {
+      //std::cout << GLOB_rank << " waiting for " << s << std::endl;
+      local.recv(GLOB_rank - 1);
+      //std::cout << GLOB_rank << " got " << s << std::endl;
+    } else {
+      local.clear();
+    }
+
+    for (int i = 0; i < r; i++) {
+      for (int j = 0; j < n; j++) {
+        for (int k = ks; k < ke; k++) {
+          local[{i, j}] += a[{i + s, k}] * b[{j, k}];
+        }
+      }
+    }
+
+    if (GLOB_rank + 1 < GLOB_size) {
+      //std::cout << GLOB_rank << " sent part " << s << std::endl;
+      local.send(GLOB_rank + 1);
+    }
+  }
+
+  b.fence();
 
   MPI_Finalize();
 }
